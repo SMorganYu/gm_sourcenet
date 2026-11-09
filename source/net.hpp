@@ -5,6 +5,7 @@
 #include <utlvector.h>
 #include <inetchannel.h>
 
+#include <cstddef>
 #include <cstdint>
 
 // 0 == regular, 1 == file stream
@@ -91,6 +92,29 @@ typedef struct netpacket_s
 	struct netpacket_s *pNext;	// for internal use, should be NULL in public (0x4C/76)
 } netpacket_t;
 
+#if defined( SOURCENET_SERVER ) && ( defined( _WIN32 ) || defined( __linux__ ) )
+namespace NetChannelLayout
+{
+	// Offsets in the supported dedicated engines, selected at module load.
+#if defined( _WIN64 ) || defined( __x86_64__ )
+	constexpr size_t reliable = 0x28, unreliable = 0x58, voice = 0x88;
+	constexpr size_t address = 0xC4, connected = 0xE0, waiting = 0xF8;
+	constexpr size_t incoming = 0x138, subchannels = 0x3B8, fileMode = 0x57C;
+	constexpr size_t name = 0x2744, messages = 0x2778;
+#elif defined( _WIN32 )
+	constexpr size_t reliable = 0x20, unreliable = 0x44, voice = 0x68;
+	constexpr size_t address = 0x98, connected = 0xB0, waiting = 0xC8;
+	constexpr size_t incoming = 0xF0, subchannels = 0x350, fileMode = 0x514;
+	constexpr size_t name = 0x26D4, messages = 0x2700;
+#else
+	constexpr size_t reliable = 0x20, unreliable = 0x44, voice = 0x68;
+	constexpr size_t address = 0x98, connected = 0xB0, waiting = 0xC4;
+	constexpr size_t incoming = 0xEC, subchannels = 0x34C, fileMode = 0x510;
+	constexpr size_t name = 0x26C8, messages = 0x26F4;
+#endif
+}
+#endif
+
 class CNetChan : public INetChannel
 {
 public:
@@ -142,6 +166,35 @@ public:
 		netframe_t *currentframe;	// current frame
 	} netflow_t;
 
+#if defined( SOURCENET_SERVER ) && ( defined( _WIN32 ) || defined( __linux__ ) )
+	uint8_t channelHeader[NetChannelLayout::reliable - sizeof( INetChannel )];
+	bf_write m_StreamReliable;
+	uint8_t reliableStorage[NetChannelLayout::unreliable - NetChannelLayout::reliable - sizeof( bf_write )];
+	bf_write m_StreamUnreliable;
+	uint8_t unreliableStorage[NetChannelLayout::voice - NetChannelLayout::unreliable - sizeof( bf_write )];
+	bf_write m_StreamVoice;
+	uint8_t voiceAndSocketStorage[NetChannelLayout::address - NetChannelLayout::voice - sizeof( bf_write )];
+	netadr_t remote_address;
+	float last_received;
+	double connect_time;
+	int32_t m_Rate;
+#if defined( _WIN32 ) || defined( __x86_64__ )
+	uint8_t ratePadding[4];
+#endif
+	double clearTime;
+	CUtlVector<dataFragments_t *> m_WaitingList[MAX_STREAMS];
+	dataFragments_t m_ReceiveList[MAX_STREAMS];
+	subchannel_s m_SubChannels[MAX_SUBCHANNELS];
+	uint8_t extraSubChannelsAndFileState[NetChannelLayout::fileMode - NetChannelLayout::subchannels - sizeof( m_SubChannels )];
+	bool m_bFileBackgroundTranmission;
+	bool m_bUseCompression;
+	uint8_t flowState[NetChannelLayout::name - NetChannelLayout::fileMode - 2];
+	char m_Name[32];
+	uint32_t m_ChallengeNr;
+	float m_Timeout;
+	uint8_t messageHandlerState[NetChannelLayout::messages - NetChannelLayout::name - 40];
+	CUtlVector<INetMessage *> m_NetMessages;
+#else
 	bool m_bProcessingMessages;
 	bool m_bShouldDelete;
 
@@ -255,4 +308,28 @@ public:
 	int32_t m_nMaxRoutablePayloadSize;
 
 	int32_t m_nSplitPacketSequence;
+#endif
 };
+
+#if defined( SOURCENET_SERVER ) && ( defined( _WIN32 ) || defined( __linux__ ) )
+static_assert( sizeof( netadr_t ) == 0x14, "network address size" );
+static_assert( sizeof( subchannel_s ) == 0x1C, "subchannel stride" );
+static_assert( offsetof( CNetChan, m_StreamReliable ) == NetChannelLayout::reliable, "reliable stream" );
+static_assert( offsetof( CNetChan, m_StreamUnreliable ) == NetChannelLayout::unreliable, "unreliable stream" );
+static_assert( offsetof( CNetChan, m_StreamVoice ) == NetChannelLayout::voice, "voice stream" );
+static_assert( offsetof( CNetChan, remote_address ) == NetChannelLayout::address, "channel address" );
+static_assert( offsetof( CNetChan, last_received ) == NetChannelLayout::address + 0x14, "last received time" );
+static_assert( offsetof( CNetChan, connect_time ) == NetChannelLayout::connected, "connect time" );
+static_assert( offsetof( CNetChan, m_Rate ) == NetChannelLayout::connected + 8, "channel rate" );
+static_assert( offsetof( CNetChan, m_WaitingList ) == NetChannelLayout::waiting, "waiting lists" );
+static_assert( offsetof( CNetChan, m_ReceiveList ) == NetChannelLayout::incoming, "receive lists" );
+static_assert( offsetof( CNetChan, m_SubChannels ) == NetChannelLayout::subchannels, "subchannels" );
+static_assert( offsetof( CNetChan, m_bFileBackgroundTranmission ) == NetChannelLayout::fileMode, "file mode" );
+static_assert( offsetof( CNetChan, m_bUseCompression ) == NetChannelLayout::fileMode + 1, "compression mode" );
+static_assert( offsetof( CNetChan, m_Name ) == NetChannelLayout::name, "channel name" );
+static_assert( offsetof( CNetChan, m_Timeout ) == NetChannelLayout::name + 36, "channel timeout" );
+static_assert( offsetof( CNetChan, m_NetMessages ) == NetChannelLayout::messages, "net message vector" );
+static_assert( sizeof( CNetChan::dataFragments_t ) == ( sizeof( void * ) == 8 ? 0x140 : 0x130 ), "fragment stride" );
+static_assert( offsetof( CNetChan::dataFragments_t, buffer ) == ( sizeof( void * ) == 8 ? 0x110 : 0x108 ), "fragment buffer" );
+static_assert( offsetof( CNetChan::dataFragments_t, total ) == ( sizeof( void * ) == 8 ? 0x130 : 0x124 ), "fragment count" );
+#endif

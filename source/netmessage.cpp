@@ -57,6 +57,7 @@ namespace NetMessage
 	{
 		INetMessage *msg;
 		CNetChan *netchan;
+		bool owned;
 	};
 
 	static int32_t metatype = 0;
@@ -71,7 +72,7 @@ namespace NetMessage
 		return msg != nullptr && NetChannel::IsValid( netchan );
 	}
 
-	void Push( GarrysMod::Lua::ILuaBase *LUA, INetMessage *msg, CNetChan *netchan )
+	void Push( GarrysMod::Lua::ILuaBase *LUA, INetMessage *msg, CNetChan *netchan, bool owned )
 	{
 		if( msg == nullptr )
 		{
@@ -80,6 +81,18 @@ namespace NetMessage
 		}
 
 		LUA->GetField( GarrysMod::Lua::INDEX_REGISTRY, table_name );
+		LUA->PushUserdata( netchan );
+		LUA->RawGet( -2 );
+		if( LUA->IsType( -1, GarrysMod::Lua::Type::NIL ) )
+		{
+			LUA->Pop( 1 );
+			LUA->CreateTable( );
+			LUA->PushUserdata( netchan );
+			LUA->Push( -2 );
+			LUA->RawSet( -4 );
+		}
+		LUA->Remove( -2 );
+
 		LUA->PushUserdata( msg );
 		LUA->GetTable( -2 );
 		if( LUA->IsType( -1, metatype ) )
@@ -93,6 +106,7 @@ namespace NetMessage
 		Container *udata = LUA->NewUserType<Container>( metatype );
 		udata->msg = msg;
 		udata->netchan = netchan;
+		udata->owned = owned;
 
 		LUA->PushMetaTable( metatype );
 		LUA->SetMetaTable( -2 );
@@ -105,13 +119,10 @@ namespace NetMessage
 
 		LUA->SetFEnv( -2 );
 
-		if( netchan != nullptr )
-		{
-			LUA->PushUserdata( netchan );
-			LUA->Push( -2 );
-			LUA->SetTable( -4 );
-			LUA->Remove( -2 );
-		}
+		LUA->PushUserdata( msg );
+		LUA->Push( -2 );
+		LUA->RawSet( -4 );
+		LUA->Remove( -2 );
 	}
 
 	inline Container *GetUserData( GarrysMod::Lua::ILuaBase *LUA, int32_t index )
@@ -123,36 +134,49 @@ namespace NetMessage
 	INetMessage *Get( GarrysMod::Lua::ILuaBase *LUA, int32_t index, CNetChan **netchan )
 	{
 		Container *udata = GetUserData( LUA, index );
-		INetMessage *msg = udata->msg;
-		CNetChan *netchannel = udata->netchan;
-		if( !IsValid( msg, netchannel ) )
+		if( udata == nullptr || !IsValid( udata->msg, udata->netchan ) )
 			LUA->FormattedError( "invalid %s", metaname );
 
 		if( netchan != nullptr )
-			*netchan = netchannel;
+			*netchan = udata->netchan;
 
-		return msg;
+		return udata->msg;
 	}
 
 	void Destroy( GarrysMod::Lua::ILuaBase *LUA, CNetChan *netchan )
 	{
 		LUA->GetField( GarrysMod::Lua::INDEX_REGISTRY, table_name );
 
-		for( int32_t k = 0; k < netchan->m_NetMessages.Count( ); ++k )
+		LUA->PushUserdata( netchan );
+		LUA->RawGet( -2 );
+		if( LUA->IsType( -1, GarrysMod::Lua::Type::TABLE ) )
 		{
-			LUA->PushUserdata( netchan->m_NetMessages[k] );
+			// Invalidate Lua's wrappers before the engine frees their messages.
 			LUA->PushNil( );
-			LUA->SetTable( -3 );
+			while( LUA->Next( -2 ) )
+			{
+				Container *udata = LUA->GetUserType<Container>( -1, metatype );
+				if( udata != nullptr )
+					udata->netchan = nullptr;
+				LUA->Pop( 1 );
+			}
 		}
 
+		LUA->Pop( 1 );
+		LUA->PushUserdata( netchan );
+		LUA->PushNil( );
+		LUA->RawSet( -3 );
 		LUA->Pop( 1 );
 	}
 
 	LUA_FUNCTION_STATIC( gc )
 	{
 		Container *udata = GetUserData( LUA, 1 );
-		if( udata->netchan == nullptr )
+		if( udata != nullptr && udata->owned )
+		{
 			delete udata->msg;
+			udata->msg = nullptr;
+		}
 
 		LUA->SetUserType( 1, nullptr );
 
@@ -470,7 +494,7 @@ namespace NetMessage
 		if( msg != nullptr )
 			msg->SetNetChannel( netchan );
 
-		Push( LUA, new( std::nothrow ) NetMessage, netchan );
+		Push( LUA, msg, netchan, true );
 		return 1;
 	}
 
@@ -498,7 +522,7 @@ namespace NetMessage
 	template<class NetMessage> void UnRegister( GarrysMod::Lua::ILuaBase *LUA )
 	{
 		LUA->PushNil( );
-		LUA->SetField( GarrysMod::Lua::INDEX_GLOBAL, NetMessage::Name );
+		LUA->SetField( GarrysMod::Lua::INDEX_GLOBAL, NetMessage::LuaName );
 	}
 
 	void Initialize( GarrysMod::Lua::ILuaBase *LUA )
@@ -811,7 +835,9 @@ namespace NetMessage
 		Register<SVC_PacketEntities>( LUA );
 		Register<SVC_TempEntities>( LUA );
 		Register<SVC_Prefetch>( LUA );
-		Register<SVC_Menu>( LUA );
+		// Some engine builds no longer instantiate this legacy message.
+		if( netmessages_vtables.find( SVC_Menu::Name ) != netmessages_vtables.end( ) )
+			Register<SVC_Menu>( LUA );
 		Register<SVC_GameEventList>( LUA );
 		Register<SVC_GetCvarValue>( LUA );
 		Register<SVC_CmdKeyValues>( LUA );
@@ -856,7 +882,8 @@ namespace NetMessage
 		UnRegister<SVC_PacketEntities>( LUA );
 		UnRegister<SVC_TempEntities>( LUA );
 		UnRegister<SVC_Prefetch>( LUA );
-		UnRegister<SVC_Menu>( LUA );
+		if( netmessages_vtables.find( SVC_Menu::Name ) != netmessages_vtables.end( ) )
+			UnRegister<SVC_Menu>( LUA );
 		UnRegister<SVC_GameEventList>( LUA );
 		UnRegister<SVC_GetCvarValue>( LUA );
 		UnRegister<SVC_CmdKeyValues>( LUA );

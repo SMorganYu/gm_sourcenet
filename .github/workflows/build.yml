@@ -1,0 +1,97 @@
+name: Build SourceNet
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  GARRYSMOD_COMMON_REV: 069a789df06d675d294961a20e8736aa070bd355
+  PREMAKE_VERSION: 5.0.0-beta8
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    strategy:
+      matrix:
+        include:
+          - platform: Win32
+            arch: x86
+            suffix: win32
+          - platform: x64
+            arch: x86_64
+            suffix: win64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: microsoft/setup-msbuild@v2
+      - name: Set up dependencies
+        shell: pwsh
+        run: |
+          $common = "$env:RUNNER_TEMP/garrysmod_common"
+          git init $common
+          git -C $common fetch --depth 1 https://github.com/danielga/garrysmod_common.git $env:GARRYSMOD_COMMON_REV
+          git -C $common checkout --detach FETCH_HEAD
+          git -C $common submodule update --init --recursive
+          $premake = "$env:RUNNER_TEMP/premake"
+          Invoke-WebRequest "https://github.com/danielga/garrysmod_common/releases/download/premake-build%2F$env:PREMAKE_VERSION/premake-$env:PREMAKE_VERSION-windows.zip" -OutFile "$premake.zip"
+          Expand-Archive "$premake.zip" $premake
+          & "$premake/premake5.exe" "--gmcommon=$common" vs2022
+      - name: Build
+        run: msbuild projects/windows/vs2022/gmsv_sourcenet.vcxproj /m /p:Configuration=Release /p:Platform=${{ matrix.platform }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sourcenet-${{ matrix.suffix }}
+          path: projects/windows/vs2022/${{ matrix.arch }}/Release/gmsv_sourcenet_${{ matrix.suffix }}.dll
+          if-no-files-found: error
+
+  linux:
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        include:
+          - arch: x86
+            suffix: linux
+          - arch: x86_64
+            suffix: linux64
+    env:
+      CC: gcc
+      CXX: g++
+      AR: gcc-ar
+      NM: gcc-nm
+      RANLIB: gcc-ranlib
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-multilib patchelf
+          common="$RUNNER_TEMP/garrysmod_common"
+          git init "$common"
+          git -C "$common" fetch --depth 1 https://github.com/danielga/garrysmod_common.git "$GARRYSMOD_COMMON_REV"
+          git -C "$common" checkout --detach FETCH_HEAD
+          git -C "$common" submodule update --init --recursive
+          premake="$RUNNER_TEMP/premake"
+          mkdir -p "$premake"
+          curl -fsSL "https://github.com/danielga/garrysmod_common/releases/download/premake-build%2F${PREMAKE_VERSION}/premake-${PREMAKE_VERSION}-linux.tar.gz" | tar -xz -C "$premake"
+          "$premake/premake5" --gmcommon="$common" gmake
+      - name: Build
+        run: make -C projects/linux/gmake -j"$(nproc)" config=release_${{ matrix.arch }} gmsv_sourcenet
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sourcenet-${{ matrix.suffix }}
+          path: projects/linux/gmake/${{ matrix.arch }}/Release/gmsv_sourcenet_${{ matrix.suffix }}.dll
+          if-no-files-found: error
+
+      - name: Build Linux x86 for Steam public
+        if: matrix.arch == 'x86'
+        run: |
+          "$RUNNER_TEMP/premake/premake5" --gmcommon="$RUNNER_TEMP/garrysmod_common" --linux-public gmake
+          make -C projects/linux/public -j"$(nproc)" config=release_x86 gmsv_sourcenet
+      - uses: actions/upload-artifact@v4
+        if: matrix.arch == 'x86'
+        with:
+          name: sourcenet-linux-public
+          path: projects/linux/public/x86/Release/gmsv_sourcenet_linux.dll
+          if-no-files-found: error

@@ -79,6 +79,11 @@ namespace NetChannel
 	{
 		LUA->GetField( GarrysMod::Lua::INDEX_REGISTRY, table_name );
 		LUA->PushUserdata( netchan );
+		LUA->RawGet( -2 );
+		if( LUA->IsType( -1, metatype ) )
+			LUA->SetUserType( -1, nullptr );
+		LUA->Pop( 1 );
+		LUA->PushUserdata( netchan );
 		LUA->PushNil( );
 		LUA->SetTable( -3 );
 		LUA->Pop( 1 );
@@ -346,9 +351,8 @@ namespace NetChannel
 
 		for( int32_t i = 0; i < MAX_SUBCHANNELS; ++i )
 		{
-			subchannel::Push( LUA, &netchan->m_SubChannels[i], netchan );
-
 			LUA->PushNumber( i + 1 );
+			subchannel::Push( LUA, &netchan->m_SubChannels[i], netchan );
 
 			LUA->SetTable( -3 );
 		}
@@ -873,7 +877,7 @@ namespace NetChannel
 	{
 		CNetChan *netchan = Get( LUA, 1 );
 
-		LUA->PushNumber( netchan->m_nMaxRoutablePayloadSize );
+		LUA->PushNumber( netchan->GetMaxRoutablePayloadSize( ) );
 
 		return 1;
 	}

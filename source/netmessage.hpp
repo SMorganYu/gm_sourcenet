@@ -7,7 +7,7 @@ class CNetChan;
 
 namespace NetMessage
 {
-	void Push( GarrysMod::Lua::ILuaBase *LUA, INetMessage *msg, CNetChan *netchan = nullptr );
+	void Push( GarrysMod::Lua::ILuaBase *LUA, INetMessage *msg, CNetChan *netchan, bool owned = false );
 
 	INetMessage *Get( GarrysMod::Lua::ILuaBase *LUA, int32_t index, CNetChan **netchan = nullptr );
 
